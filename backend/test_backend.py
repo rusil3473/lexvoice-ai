@@ -67,3 +67,42 @@ def test_escrow_vault_lifecycle():
     assert released["status"] == "RELEASED"
     assert released["ip_released"] is True
     assert released["release_tx"].startswith("0x")
+
+def test_sqlite_persistence_api():
+    from fastapi.testclient import TestClient
+    from app import app
+    client = TestClient(app)
+
+    # 1. Health check
+    res = client.get("/api/health")
+    assert res.status_code == 200
+    data = res.json()
+    assert "SQLite" in data["database"]["engine"]
+    assert data["database"]["stats"]["milestones"] >= 2
+
+    # 2. Create milestone
+    ms_payload = {
+        "project_name": "Cloud Microservices",
+        "milestone_title": "Phase 1 Auth API",
+        "amount_usd": 2500.0,
+        "developer_email": "dev@cloud.io",
+        "client_email": "client@enterprise.com",
+        "deliverable_summary": "Go microservices with JWT auth and SQLite persistence"
+    }
+    create_res = client.post("/api/escrow/create", json=ms_payload)
+    assert create_res.status_code == 200
+    created = create_res.json()
+    ms_id = created["milestone_id"]
+    assert created["status"] == "LOCKED"
+
+    # 3. Fund milestone
+    fund_res = client.post(f"/api/escrow/fund/{ms_id}")
+    assert fund_res.status_code == 200
+    assert fund_res.json()["status"] == "FUNDED"
+
+    # 4. Release milestone
+    rel_res = client.post(f"/api/escrow/release/{ms_id}")
+    assert rel_res.status_code == 200
+    assert rel_res.json()["status"] == "RELEASED"
+    assert rel_res.json()["ip_released"] is True
+

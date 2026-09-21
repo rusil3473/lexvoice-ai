@@ -4,22 +4,34 @@ Powers autonomous cross-border legal compliance, contract dispute risk analysis,
 DPDP Act 2023 auditing, cryptographic milestone escrow, and real-time voice streaming.
 """
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+from sqlalchemy.orm import Session
+from datetime import datetime
 import json
 import asyncio
+import hashlib
+import uuid
+import time
+
+from database import engine, get_db
+from models import MilestoneRecord, ContractAuditRecord, DPDPAuditRecord
+from seed_data import init_db
 
 from contract_engine import analyze_contract
 from dpdp_compliance import audit_dpdp_compliance
 from escrow_vault import global_escrow
 from sample_contracts import SAMPLE_CONTRACTS
 
+# Initialize SQLite database with tables and initial records
+init_db()
+
 app = FastAPI(
     title="LexVoice AI API",
-    description="Cross-Border Legal Compliance & Voice Intelligence Platform",
-    version="1.0.0"
+    description="Cross-Border Legal Compliance & Voice Intelligence Platform with SQLite WAL Mode",
+    version="2.0.0"
 )
 
 # Enable CORS for local Vite dev server
@@ -53,12 +65,28 @@ class SovereignAuditRequest(BaseModel):
     model_name: Optional[str] = "Apertus-1.5-70B-Instruct"
 
 @app.get("/api/health")
-def health_check():
+def health_check(db: Session = Depends(get_db)):
+    milestone_count = db.query(MilestoneRecord).count()
+    audit_count = db.query(ContractAuditRecord).count()
     return {
         "status": "online",
         "service": "LexVoice AI Core",
-        "version": "1.0.0",
-        "modules": ["contract_engine", "dpdp_compliance", "escrow_vault", "assembly_voice", "apertus_sovereign"]
+        "version": "2.0.0",
+        "database": {
+            "engine": "SQLite 3 (WAL Mode)",
+            "persistence": "ACID Enabled",
+            "stats": {
+                "milestones": milestone_count,
+                "contract_audits": audit_count
+            }
+        },
+        "modules": [
+            "contract_dispute_risk_engine",
+            "dpdp_act_2023_auditor",
+            "cryptographic_milestone_vault_sqlite",
+            "realtime_voice_websocket",
+            "sovereign_apertus_70b_pipeline"
+        ]
     }
 
 @app.get("/api/sample-contracts")
@@ -66,40 +94,61 @@ def get_sample_contracts():
     return SAMPLE_CONTRACTS
 
 @app.post("/api/analyze-contract")
-def endpoint_analyze_contract(req: ContractAnalyzeRequest):
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="Contract text cannot be empty")
-    return analyze_contract(req.text)
+def analyze_contract_endpoint(req: ContractAnalyzeRequest, db: Session = Depends(get_db)):
+    res = analyze_contract(req.text, req.jurisdiction)
+    # Persist audit record to SQLite
+    try:
+        audit = ContractAuditRecord(
+            id=f"AUD-{uuid.uuid4().hex[:8].upper()}",
+            title=req.contract_title,
+            jurisdiction=req.jurisdiction,
+            raw_text=req.text[:2000],
+            risk_score=float(res.get("risk_score", 0)),
+            verdict=res.get("verdict", "ANALYZED"),
+            findings_json=json.dumps(res.get("findings", [])),
+            created_at=datetime.utcnow()
+        )
+        db.add(audit)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+    return res
 
 @app.post("/api/audit-dpdp")
-def endpoint_audit_dpdp(req: ContractAnalyzeRequest):
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="Contract text cannot be empty")
-    return audit_dpdp_compliance(req.text)
+def audit_dpdp_endpoint(req: ContractAnalyzeRequest, db: Session = Depends(get_db)):
+    res = audit_dpdp_compliance(req.text)
+    try:
+        audit = DPDPAuditRecord(
+            id=f"DPDP-{uuid.uuid4().hex[:8].upper()}",
+            contract_title=req.contract_title,
+            compliance_score=float(res.get("compliance_score", 0)),
+            is_compliant=bool(res.get("is_compliant", False)),
+            violations_json=json.dumps(res.get("violations", [])),
+            created_at=datetime.utcnow()
+        )
+        db.add(audit)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+    return res
 
-@app.post("/api/plain-translate")
-def endpoint_plain_translate(req: PlainTranslateRequest):
-    clause = req.clause_text.strip()
-    if not clause:
-        raise HTTPException(status_code=400, detail="Clause text cannot be empty")
-        
-    # Translate legalese to plain language
+@app.post("/api/translate-clause")
+def translate_clause(req: PlainTranslateRequest):
     translations = {
-        "en": {
-            "plain_summary": "In plain English: The client can demand endless free work, keep your code without paying, and if a dispute arises, forces you to travel to Delaware court where legal fees will bankrupt you.",
-            "action_advice": "Never sign without capping revisions to 2 rounds and requiring milestone escrow before git repository transfer.",
-            "risk_level": "Severe Predatory Hazard"
-        },
         "hi": {
-            "plain_summary": "सरल शब्दों में: क्लाइंट आपसे अनगिनत मुफ्त बदलाव करवा सकता है, बिना भुगतान किए आपका पूरा कोड रख सकता है, और विवाद होने पर आपको अमेरिका की डेलावेयर अदालत में घसीट सकता है जिसका खर्च आपके बिल से ज़्यादा होगा।",
-            "action_advice": "बिना 2-राउंड सीमा और माइलस्टोन एस्क्रो के इस अनुबंध पर कभी हस्ताक्षर न करें।",
-            "risk_level": "अत्यधिक जोखिम (खतरनाक अनुबंध)"
+            "plain_summary": "ग्राहक जब तक पूरी तरह संतुष्ट न हो जाए, डेवलपर को बिना किसी अतिरिक्त भुगतान के सभी संशोधन करने होंगे।",
+            "action_advice": "इस धारा पर कभी हस्ताक्षर न करें। दायरा 2 संशोधन चक्रों तक सीमित रखें और अतिरिक्त काम के लिए $50/घंटे का अनुबंध करें।",
+            "risk_level": "CRITICAL"
+        },
+        "en": {
+            "plain_summary": "Developer must make unlimited modifications for free until the client is subjectively satisfied.",
+            "action_advice": "Delete 'full satisfaction' clause. Cap revisions at 2 rounds and bill $50/hour for out-of-scope requests.",
+            "risk_level": "CRITICAL"
         }
     }
-    
     selected = translations.get(req.target_lang, translations["en"])
     return {
-        "original_clause": clause,
+        "original_clause": req.clause_text,
         "language": req.target_lang,
         "plain_translation": selected["plain_summary"],
         "action_advice": selected["action_advice"],
@@ -107,33 +156,68 @@ def endpoint_plain_translate(req: PlainTranslateRequest):
     }
 
 @app.get("/api/escrow/milestones")
-def list_escrow_milestones():
+def list_escrow_milestones(db: Session = Depends(get_db)):
+    milestones = db.query(MilestoneRecord).order_by(MilestoneRecord.created_at.desc()).all()
+    if milestones:
+        return [m.to_dict() for m in milestones]
     return global_escrow.list_milestones()
 
 @app.post("/api/escrow/create")
-def create_escrow_milestone(req: CreateMilestoneRequest):
-    return global_escrow.create_milestone(
+def create_escrow_milestone(req: CreateMilestoneRequest, db: Session = Depends(get_db)):
+    milestone_id = f"MS-{uuid.uuid4().hex[:8].upper()}"
+    now = datetime.utcnow()
+    created_at_ts = int(now.timestamp())
+    
+    commitment_payload = f"{milestone_id}:{req.project_name}:{req.milestone_title}:{req.amount_usd}:{created_at_ts}:{req.deliverable_summary}"
+    sha256_hash = hashlib.sha256(commitment_payload.encode('utf-8')).hexdigest()
+
+    rec = MilestoneRecord(
+        id=milestone_id,
         project_name=req.project_name,
         milestone_title=req.milestone_title,
         amount_usd=req.amount_usd,
         developer_email=req.developer_email,
         client_email=req.client_email,
-        deliverable_summary=req.deliverable_summary
+        deliverable_summary=req.deliverable_summary,
+        sha256_commitment=sha256_hash,
+        status="LOCKED",
+        ip_released=False,
+        created_at=now
     )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return rec.to_dict()
 
 @app.post("/api/escrow/fund/{milestone_id}")
-def fund_escrow_milestone(milestone_id: str):
-    try:
-        return global_escrow.fund_milestone(milestone_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+def fund_escrow_milestone(milestone_id: str, db: Session = Depends(get_db)):
+    m = db.query(MilestoneRecord).filter(MilestoneRecord.id == milestone_id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail=f"Milestone {milestone_id} not found in SQLite vault")
+    
+    m.status = "FUNDED"
+    m.funded_at = datetime.utcnow()
+    m.payment_method = "Stripe/Escrow Verified"
+    db.commit()
+    db.refresh(m)
+    return m.to_dict()
 
 @app.post("/api/escrow/release/{milestone_id}")
-def release_escrow_milestone(milestone_id: str):
-    try:
-        return global_escrow.release_milestone(milestone_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+def release_escrow_milestone(milestone_id: str, db: Session = Depends(get_db)):
+    m = db.query(MilestoneRecord).filter(MilestoneRecord.id == milestone_id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail=f"Milestone {milestone_id} not found in SQLite vault")
+    
+    if m.status != "FUNDED":
+        raise HTTPException(status_code=400, detail="Cannot release milestone: Escrow is not funded by client yet")
+        
+    m.status = "RELEASED"
+    m.ip_released = True
+    m.released_at = datetime.utcnow()
+    m.release_tx = f"0x{uuid.uuid4().hex}"
+    db.commit()
+    db.refresh(m)
+    return m.to_dict()
 
 @app.post("/api/sovereign-audit")
 def sovereign_apertus_audit(req: SovereignAuditRequest):
